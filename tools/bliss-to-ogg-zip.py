@@ -136,42 +136,6 @@ class SprintCacheHandler:
         self.pp_counter = 0
 
     @staticmethod
-    def _load_sprint_cache(opt):
-        """
-        :param str opt: either filename or filename pattern
-        :rtype: SprintCache.FileArchiveBundle|SprintCache.FileArchive
-        """
-        if "*" in opt:
-            sprint_cache_fns = glob(opt)
-            assert sprint_cache_fns, "nothing found under sprint cache pattern %r" % (opt,)
-            sprint_cache = returnn.sprint.cache.FileArchiveBundle()
-            for fn in sprint_cache_fns:
-                print("Load Sprint cache:", fn)
-                sprint_cache.add_bundle_or_archive(fn)
-        else:
-            print("Load Sprint cache:", opt)
-            sprint_cache = returnn.sprint.cache.open_file_archive(opt, must_exists=True)
-        return sprint_cache
-
-    @staticmethod
-    def _collect_seg_times_from_bliss(opt):
-        """
-        :param str opt: either filename or filename pattern
-        :rtype: dict[str,(Decimal,Decimal)]
-        """
-        if "*" in opt:
-            items = []
-            fns = glob(opt)
-            assert fns, "nothing found under Bliss XML cache pattern %r" % (opt,)
-            for fn in fns:
-                print("Load Bliss XML:", fn)
-                items.extend(iter_bliss(fn))
-        else:
-            print("Load Bliss XML:", opt)
-            items = list(iter_bliss(opt))
-        return {seq.segment_name: (seq.start_time, seq.end_time) for seq in items}
-
-    # noinspection PyUnusedLocal
     def feature_post_process(self, feature_data, seq_name, **kwargs):
         """
         :param numpy.ndarray feature_data:
@@ -190,29 +154,41 @@ class SprintCacheHandler:
         prev_end_frame = None
         res_feature_data = []
         seq_time_offset = float(self.seg_times[seq_name][0])
-        for (start_time, end_time), feat in zip(times, data):
-            start_time -= seq_time_offset
-            end_time -= seq_time_offset
-            center_time = (start_time + end_time) / 2.0
-            start_frame = int(center_time * self.raw_sample_rate) - num_frames_per_feat // 2
-            assert 0 <= start_frame < feature_data.shape[0]
-            if prev_end_frame is not None:
-                if (
-                    prev_end_frame - allowed_variance_num_frames
-                    <= start_frame
-                    <= prev_end_frame + allowed_variance_num_frames
-                ):
-                    start_frame = prev_end_frame
-                assert start_frame >= prev_end_frame
-            end_frame = start_frame + num_frames_per_feat
-            if feature_data.shape[0] < end_frame <= feature_data.shape[0] + allowed_variance_num_frames:
-                res_feature_data.append(feature_data[start_frame:])
-                res_feature_data.append(numpy.zeros((end_frame - feature_data.shape[0], 1), dtype=feature_data.dtype))
-            else:
-                assert end_frame <= feature_data.shape[0]
-                res_feature_data.append(feature_data[start_frame:end_frame])
-            prev_end_frame = end_frame
-        res_feature_data = numpy.concatenate(res_feature_data, axis=0)
+        for (start_time, end_time), feat in zip(times, data):  
+          if prev_end_frame is not None and prev_end_frame >= feature_data.shape[0]:
+            continue  # Skip processing this segment
+          start_time -= seq_time_offset
+          end_time -= seq_time_offset
+          center_time = (start_time + end_time) / 2.
+          start_frame = int(center_time * self.raw_sample_rate) - num_frames_per_feat // 2
+          assert 0 <= start_frame < feature_data.shape[0]
+          if prev_end_frame is not None:
+            if prev_end_frame - allowed_variance_num_frames <= start_frame <= prev_end_frame + allowed_variance_num_frames:
+              start_frame = prev_end_frame
+            assert start_frame >= prev_end_frame
+          end_frame = start_frame + num_frames_per_feat
+          if feature_data.shape[0] < end_frame <= feature_data.shape[0] + allowed_variance_num_frames:
+            res_feature_data.append(feature_data[start_frame:])
+            res_feature_data.append(numpy.zeros((end_frame - feature_data.shape[0], 1), dtype=feature_data.dtype))
+          else:
+            if end_frame > feature_data.shape[0]:
+              end_frame = feature_data.shape[0]
+            #assert end_frame <= feature_data.shape[0]
+            res_feature_data.append(feature_data[start_frame:end_frame])
+          prev_end_frame = end_frame
+    
+        is_final_segment = True 
+        if is_final_segment:
+            final_expected_length = len(data) * num_frames_per_feat
+            current_total_length = sum([seg.shape[0] for seg in res_feature_data])
+            padding_needed = final_expected_length - current_total_length
+            
+            if padding_needed > 0:
+                padding = numpy.zeros((padding_needed, 1), dtype=feature_data.dtype)
+                res_feature_data.append(padding)
+            elif padding_needed < 0:
+                raise ValueError("The processed data exceeds the expected length.")
+    
         assert res_feature_data.shape[0] % num_frames_per_feat == 0
         assert res_feature_data.shape[0] // num_frames_per_feat == len(data)
         return res_feature_data
